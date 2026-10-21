@@ -27,7 +27,7 @@ OpenCode installs the plugin straight from GitHub — add it to `~/.config/openc
 {
   "plugins": [
     {
-      "package": "github:Alamion/opencode-autodiscover#v3.0.0",
+      "package": "github:Alamion/opencode-autodiscover#v3.0.1",
       "options": {
         "providers": {
           "litellm": {
@@ -41,7 +41,7 @@ OpenCode installs the plugin straight from GitHub — add it to `~/.config/openc
 }
 ```
 
-Pin a tag (`#v3.0.0`) to stay on a release; drop it to follow `main`. To hack on the plugin,
+Pin a tag (`#v3.0.1`) to stay on a release; drop it to follow `main`. To hack on the plugin,
 clone it and use the checkout's absolute path as `package` (a `file://…` URL or a path starting
 with `./` relative to the config file also work) — local plugins reload when their files change.
 

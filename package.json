@@ -1,6 +1,6 @@
 {
   "name": "opencode-autodiscover",
-  "version": "3.0.0",
+  "version": "3.0.1",
   "description": "OpenCode v2 plugin: discover models from OpenAI-compatible endpoints (LiteLLM, vLLM, Ollama, LM Studio) with prices, limits and readable names",
   "keywords": [
     "litellm",
@@ -35,9 +35,6 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
-  },
-  "peerDependencies": {
-    "@opencode/plugin": "^2.1.0"
   },
   "devDependencies": {
     "@opencode/plugin": "2.1.2",

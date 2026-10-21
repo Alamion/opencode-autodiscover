@@ -1,164 +1,192 @@
 # opencode-autodiscover
 
-Auto-discover models from local OpenAI-compatible API endpoints for [OpenCode](https://opencode.ai).
+OpenCode **v2** plugin that discovers models from OpenAI-compatible endpoints — LiteLLM, vLLM,
+Ollama, LM Studio, any `/v1/models` server — and registers them with prices, context limits,
+capabilities and readable names.
 
-## Features
+- **Metadata, not just ids.** Prices, context/output limits, tool/vision/PDF support and reasoning
+  effort variants come from LiteLLM's `/model/info`, the models.dev catalog OpenCode already
+  loads, and OpenRouter's public list — no hand-written model blocks.
+- **Keys out of config.** The API key is read from the OS keyring (or an env variable, a
+  command, or a `0600` file) and attached to requests by a hook, so it never sits in
+  `opencode.json` and never enters the provider catalog that OpenCode serves over its API.
+- **Readable names.** `alibaba/qwen3.5-122b-a10b` shows as *Qwen3.5 122B-A10B (Alibaba)*,
+  `local/qwen3.8-27b` as *Qwen3.8 27B (local)*.
+- **Ids that resolve.** The id you pick in OpenCode and the id sent to the server are kept
+  apart: `local\qwen3.8-27b` is listed as `local/qwen3.8-27b` but requested verbatim.
+- **Stays fresh, survives outages.** Re-polls every 5 minutes; the last good result is cached
+  on disk, so the model list is there at startup even if the endpoint is down.
 
-- Auto-discovers models from local endpoints (Ollama, LM Studio, LLM proxies)
-- Fetches metadata from Models.dev and OpenRouter (context window, capabilities, cost)
-- Caches metadata locally (24h TTL)
-- Supports multiple endpoints
-- API key authentication via config or environment variables
-- Model filtering with include/exclude patterns
+Requires OpenCode 2.1 or newer. For OpenCode 1.x use `opencode-autodiscover@1`.
 
-## Installation
+## Install
 
-```bash
-opencode plugin opencode-autodiscover
-```
-
-Or install globally:
-
-```bash
-opencode plugin opencode-autodiscover -g
-```
-
-> The v2 plugin (OpenCode v2 / beta plugin API) publishes under the `next` npm tag: `opencode plugin opencode-autodiscover@next`. The `latest` tag still tracks the v1 plugin for stable OpenCode.
-
-### CLI Options
-
-```
-opencode plugin opencode-autodiscover         # Install to project config
-opencode plugin opencode-autodiscover -g      # Install to global config
-opencode plugin opencode-autodiscover -f      # Force update existing plugin
-opencode plugin opencode-autodiscover --pure  # Run without external plugins
-```
-
-## How It Works
-
-1. On startup, the plugin reads `options.endpoints` from its plugin config
-2. Fetches available models from each endpoint (`/v1/models`)
-3. Looks up metadata from Models.dev and OpenRouter (context window, cost, capabilities)
-4. Registers the discovered providers and models in the OpenCode catalog via a catalog transform
-5. Models appear in the `/models` UI natively; the `refresh-local-models` tool replays the transform live
-
-## Caching
-
-Metadata lookups are cached to keep startup fast:
-
-- **OpenRouter catalog** — written to `openrouter.json` under `~/.cache/opencode-autodiscover/` (24h TTL). Override the location with the `OPENCODE_AUTODISCOVER_CACHE_DIR` environment variable.
-- **Models.dev** — loaded in memory per process from the bundled `models-dev-db` package; rebuilt on each startup.
-
-Use the `refresh-local-models` tool to clear both caches and re-fetch — the catalog is updated immediately, no restart needed.
-
-## Configuration
-
-Add the plugin to the `plugins` array in your `opencode.jsonc`, listing each local endpoint under `options.endpoints`:
+OpenCode installs the plugin straight from GitHub — add it to `~/.config/opencode/opencode.json`:
 
 ```jsonc
 {
-  "$schema": "https://opencode.ai/config.json",
   "plugins": [
     {
-      "package": "opencode-autodiscover",
+      "package": "github:Alamion/opencode-autodiscover#v3.0.0",
       "options": {
-        "endpoints": [
-          {
-            "id": "local-ollama",
-            "name": "Ollama",
-            "baseURL": "http://localhost:11434/v1",
-          },
-          {
-            "id": "local-lmstudio",
-            "name": "LM Studio",
-            "baseURL": "http://localhost:1234/v1",
-          },
-        ],
-      },
-    },
-  ],
+        "providers": {
+          "litellm": {
+            "name": "LiteLLM",
+            "baseURL": "http://litellm.internal:4000/v1"
+          }
+        }
+      }
+    }
+  ]
 }
 ```
 
-Each endpoint supports:
+Pin a tag (`#v3.0.0`) to stay on a release; drop it to follow `main`. To hack on the plugin,
+clone it and use the checkout's absolute path as `package` (a `file://…` URL or a path starting
+with `./` relative to the config file also work) — local plugins reload when their files change.
 
-- `id` (required) — provider id used in the catalog (e.g. `local-ollama`)
-- `baseURL` (required) — base URL of the OpenAI-compatible API
-- `name` — display name for the provider
-- `apiKey` — API key sent to the endpoint
-- `headers` — extra HTTP headers sent with requests
-- `include` / `exclude` — model filtering patterns (see below)
+Then store the key (next section) and run `opencode models` — the models appear as
+`litellm/<id>`.
 
-### Environment Variables
+## API keys
 
-API keys can be set via environment variables instead of `apiKey`:
+Without an `apiKey` option the plugin tries, in order:
+
+1. OS keyring entry `service=opencode-autodiscover`, `account=<provider id>`
+2. `OPENCODE_AUTODISCOVER_<ID>_API_KEY`
+3. `OPENCODE_LOCAL_<ID>_API_KEY` (1.x name)
+
+Store the key in the keyring once:
 
 ```bash
-export OPENCODE_LOCAL_MY_PROXY_API_KEY=sk-your-key
+# Linux (GNOME Keyring, KWallet — anything implementing the Secret Service API)
+secret-tool store --label="opencode-autodiscover: litellm" service opencode-autodiscover account litellm
+
+# macOS
+security add-generic-password -s opencode-autodiscover -a litellm -w
 ```
 
-The variable name is derived from the endpoint id: `OPENCODE_LOCAL_` + the id uppercased with `-` replaced by `_`.
+Other sources, alone or as a fallback chain:
 
-### Model Filtering
+```jsonc
+"apiKey": { "keyring": { "service": "litellm", "account": "work" } }
+"apiKey": { "env": "LITELLM_API_KEY" }
+"apiKey": { "command": ["pass", "show", "litellm/api-key"] }   // run without a shell
+"apiKey": { "file": "~/.config/litellm.key" }                   // warns unless chmod 600
+"apiKey": [{ "keyring": true }, { "env": "LITELLM_API_KEY" }]
+"apiKey": false                                                  // endpoint needs no key
+```
 
-Control which models are discovered using `include` and `exclude` glob patterns on an endpoint:
+A literal string still works but is logged as a warning.
+
+How the key is used: discovery requests send it directly; model requests get an
+`Authorization: Bearer …` header from a `model.request` hook. Set `"keyDelivery": "settings"`
+to store it as the provider's `apiKey` setting instead — only needed if another plugin must see
+it, and note that OpenCode then returns it from its local model API.
+
+After rotating the key in the keyring nothing needs restarting: a `401` makes the plugin
+read the key again.
+
+## Where metadata comes from
+
+Highest priority first; each field takes the first source that has it.
+
+| Source | Gives | Toggle |
+| --- | --- | --- |
+| `models` overrides in options | anything | — |
+| `/models` of the endpoint | context (vLLM `max_model_len`, OpenRouter-style fields), display name | — |
+| LiteLLM `/model/info` | prices incl. cache, context/output limits, tools, vision, PDF, reasoning, chat/embedding mode | `metadata.litellm` |
+| models.dev (OpenCode's catalog) | curated name, family, release date, modalities, reasoning effort levels, prices | `metadata.catalog` |
+| OpenRouter `/api/v1/models` | context, max output, prices, modalities | `metadata.openrouter` |
+| defaults | 32k context, 8k output, tools on | — |
+
+Prices are stored in USD per 1M tokens, the unit OpenCode uses (LiteLLM reports per token;
+the plugin converts). Models LiteLLM marks as non-chat (embeddings, image, audio) are skipped.
+
+Matching against models.dev uses LiteLLM's underlying model first (`dashscope/qwen3.8-max` →
+the Alibaba catalog, `openrouter/anthropic/…` → OpenRouter), then the alias, then a
+normalized name with quantization and `-latest` suffixes removed. The curated name is used only
+when the alias names that exact model; an alias that points at another checkpoint keeps its own.
+
+If an output limit equals the context window, it is halved so requests leave room for input.
+
+## Names and groups
+
+The first path segment of an id becomes a label: `local/…` → "(local)", `openrouter/…` →
+"(OpenRouter)", unknown prefixes are capitalized. Change or hide them per prefix:
+
+```jsonc
+"groups": { "local": "GPU rack", "alibaba": false }
+```
+
+## All options
 
 ```jsonc
 {
-  "$schema": "https://opencode.ai/config.json",
-  "plugins": [
-    {
-      "package": "opencode-autodiscover",
-      "options": {
-        "endpoints": [
-          {
-            "id": "local-ollama",
-            "baseURL": "http://localhost:11434/v1",
-            "include": ["qwen/*"],
-            "exclude": ["*embedding*", "*test*"],
-          },
-        ],
-      },
-    },
-  ],
+  "providers": {
+    "<provider id>": {
+      "baseURL": "http://host:4000/v1",       // required
+      "name": "LiteLLM",                      // provider name in the UI
+      "apiKey": { "keyring": true },          // see "API keys"
+      "keyDelivery": "header",                // or "settings"
+      "headers": { "X-Team": "platform" },    // sent on discovery and model requests
+      "include": ["alibaba/*", "local/*"],    // globs over raw or catalog ids, case-insensitive
+      "exclude": ["*preview*"],
+      "metadata": { "litellm": true, "catalog": true, "openrouter": true },
+      "groups": { "local": "GPU rack" },
+      "models": {
+        "local/qwen3.8-27b": {                // raw or catalog id
+          "name": "Qwen 27B on the rack",
+          "limit": { "context": 131072, "output": 32768 },
+          "cost": { "input": 0, "output": 0 },   // USD per 1M tokens
+          "tools": true,
+          "vision": false,
+          "reasoning": true,
+          "efforts": ["low", "high"],         // variants, selected as model#low
+          "disabled": false
+        }
+      }
+    }
+  },
+  "refreshInterval": 300,                     // seconds, 0 = only at startup
+  "timeout": 10000,                           // ms per HTTP request
+  "cacheDir": "~/.cache/opencode-autodiscover"
 }
 ```
 
-- `include` — if set, only models matching at least one pattern are discovered
-- `exclude` — models matching any pattern are skipped (applied after `include`)
-- `*` matches anything (including `/`)
-- Matching is case-insensitive
-- Special characters (`.`, `[`, `]`, etc.) are treated as literals
+Models declared for the same provider id in OpenCode's own `providers` config are kept; a
+discovered model with the same id replaces its declared twin.
 
-## Usage
+## Files
 
-Models are auto-discovered at startup and appear in `/models` natively.
+`~/.cache/opencode-autodiscover/` (or `$OPENCODE_AUTODISCOVER_CACHE_DIR`, or `cacheDir`):
 
-### Refreshing Models
+- `endpoint-<id>.json` — last discovery result (no secrets)
+- `openrouter.json` — OpenRouter list, refreshed daily
+- `autodiscover.log` — plugin log; OpenCode does not show plugin console output
 
-- **Terminal Slash Command**: Run `/refresh-models` (or `/models:refresh`, `/autodiscover:refresh`) in the OpenCode TUI prompt.
-- **Command Palette**: Select **Refresh Local Models** from the command palette.
-- **Agent Tool**: Use the `refresh-local-models` tool during agent sessions.
+## Migrating
 
-When refreshed, the plugin synchronizes local endpoints, updates the catalog, and displays a toast notification in the terminal. A restart is not needed.
+From **1.x** (OpenCode 1): move the provider from the top-level `provider` block into the
+plugin's `options.providers`, drop hand-written `models`, remove `"plugin":
+["opencode-autodiscover"]`, and move the key to the keyring. A v1 provider without `npm`
+fails in OpenCode 2 with `Unsupported package`; this plugin sets the OpenAI-compatible
+package itself.
 
-### CLI / Remote Configuration
-
-When using a remote OpenCode server, configure the package in `cli.json` to keep TUI commands active locally:
-
-```json
-{
-  "plugins": ["opencode-autodiscover"]
-}
-```
+From **2.0.x**: `options.endpoints` arrays still work. The TUI companion and the
+`refresh-local-models` tool are gone; models refresh every `refreshInterval` seconds, and
+editing a local plugin's files reloads it.
 
 ## Development
 
 ```bash
 npm install
 npm test
-npm run build
+npm run typecheck
 ```
+
+The plugin is plain TypeScript loaded by OpenCode's Bun runtime; there is no build step.
+`effect` and `@opencode/plugin` are provided by OpenCode at runtime and are dev-only here.
 
 ## License
 

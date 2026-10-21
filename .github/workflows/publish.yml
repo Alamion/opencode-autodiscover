@@ -1,8 +1,8 @@
 name: Publish to npm
 
+# Manual until the fork has its own npm package name; the upstream name belongs to rakheOmar.
 on:
-  release:
-    types: [published]
+  workflow_dispatch:
 
 concurrency:
   group: publish

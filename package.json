@@ -1,64 +1,48 @@
 {
   "name": "opencode-autodiscover",
-  "version": "2.0.2",
-  "description": "Auto-discover models from local OpenAI-compatible API endpoints for OpenCode",
+  "version": "3.0.0",
+  "description": "OpenCode v2 plugin: discover models from OpenAI-compatible endpoints (LiteLLM, vLLM, Ollama, LM Studio) with prices, limits and readable names",
   "keywords": [
+    "litellm",
     "llm",
     "lm-studio",
     "local-models",
     "ollama",
     "opencode",
-    "plugin"
+    "plugin",
+    "vllm"
   ],
-  "homepage": "https://github.com/rakheOmar/opencode-autodiscover",
   "license": "MIT",
   "author": "rakheomar",
+  "contributors": [
+    "Alamion"
+  ],
+  "homepage": "https://github.com/Alamion/opencode-autodiscover#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/rakheOmar/opencode-autodiscover.git"
+    "url": "git+https://github.com/Alamion/opencode-autodiscover.git"
   },
   "type": "module",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
   "exports": {
-    ".": "./src/index.ts",
-    "./tui": "./src/tui.ts"
+    ".": "./index.ts",
+    "./server": "./index.ts"
   },
+  "files": [
+    "index.ts",
+    "src"
+  ],
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
-    "check": "ultracite check",
-    "fix": "ultracite fix",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
   },
-  "dependencies": {
-    "@opencode-ai/plugin": "next",
-    "models-dev-db": "latest"
+  "peerDependencies": {
+    "@opencode/plugin": "^2.1.0"
   },
   "devDependencies": {
-    "@types/node": "^26.1.2",
-    "oxfmt": "^0.61.0",
-    "oxlint": "^1.76.0",
-    "solid-js": "^1.9.15",
-    "typescript": "^7.0.2",
-    "ultracite": "^7.9.4",
-    "vitest": "^4.1.10"
-  },
-  "peerDependencies": {
-    "@opentui/core": ">=0.4.5",
-    "@opentui/solid": ">=0.4.5",
-    "solid-js": ">=1.9.0"
-  },
-  "peerDependenciesMeta": {
-    "@opentui/core": {
-      "optional": true
-    },
-    "@opentui/solid": {
-      "optional": true
-    },
-    "solid-js": {
-      "optional": true
-    }
+    "@opencode/plugin": "2.1.2",
+    "@types/node": "^22.10.0",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
   }
 }

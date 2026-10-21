@@ -1,511 +1,205 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdtemp, readFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 
-import type {
-  DiscoveredModel,
-  ModelsDevModel,
-  OpenRouterModel,
-} from "../src/types";
+import type { Model, Plugin, Provider } from "@opencode/plugin";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock(import("../src/fetcher"), () => ({
-  fetchModels: vi.fn<() => Promise<DiscoveredModel[]>>(),
-}));
+import { createPlugin } from "../src/plugin.ts";
+import { template } from "./fixtures.ts";
 
-vi.mock(import("../src/openrouter"), () => ({
-  clearCache: vi.fn<() => void>(),
-  lookupModelMetadata: vi.fn<() => Promise<OpenRouterModel | null>>(),
-}));
-
-vi.mock(import("../src/modelsdev"), () => ({
-  clearCache: vi.fn<() => void>(),
-  lookupModelMetadata: vi.fn<() => Promise<ModelsDevModel | null>>(),
-}));
-
-const { default: plugin } = await import("../src/index");
-const { fetchModels } = await import("../src/fetcher");
-const {
-  clearCache: clearOpenRouterCache,
-  lookupModelMetadata: lookupOpenRouterMetadata,
-} = await import("../src/openrouter");
-const {
-  clearCache: clearModelsDevCache,
-  lookupModelMetadata: lookupModelsDevMetadata,
-} = await import("../src/modelsdev");
-
-const mockFetchModels = vi.mocked(fetchModels);
-const mockLookupOpenRouterMetadata = vi.mocked(lookupOpenRouterMetadata);
-const mockLookupModelsDevMetadata = vi.mocked(lookupModelsDevMetadata);
-const mockClearOpenRouterCache = vi.mocked(clearOpenRouterCache);
-const mockClearModelsDevCache = vi.mocked(clearModelsDevCache);
-
-const createModel = (id: string): DiscoveredModel => ({ id, name: id });
-
-const createEndpoint = (
-  id: string,
-  baseURL: string,
-  extra: Record<string, unknown> = {}
-) => ({ baseURL, id, ...extra });
-
-interface ProviderDraft {
-  headers?: Record<string, string>;
-  name: string;
-  package: string;
-  settings: Record<string, unknown>;
+interface Record_ {
+  provider: Provider.Info;
+  models: Map<string, Model.Info>;
 }
 
-interface ModelDraft {
-  capabilities: { input: string[]; output: string[]; tools: boolean };
-  cost: unknown[];
-  enabled: boolean;
-  id: string;
-  limit: { context: number; output: number };
-  name: string;
-}
-
-interface RefreshTool {
-  name: string;
-  description: string;
-  execute: (
-    input: unknown,
-    context: unknown
-  ) => Promise<{ content?: string; output?: unknown }>;
-}
-
-const createMockContext = (options: Readonly<Record<string, unknown>> = {}) => {
-  const providerDraft: ProviderDraft = { name: "", package: "", settings: {} };
-  const modelDraft: ModelDraft = {
-    capabilities: { input: [], output: [], tools: false },
-    cost: [],
-    enabled: false,
-    id: "",
-    limit: { context: 0, output: 0 },
-    name: "",
-  };
-
-  const catalog = {
-    model: {
-      get: vi.fn<(_providerId: string, _modelId: string) => unknown>(
-        (_providerId, _modelId) => {}
-      ),
-      update: vi.fn<
-        (
-          providerId: string,
-          modelId: string,
-          update: (draft: ModelDraft) => void
-        ) => void
-      >((_providerId, _modelId, update) => {
-        update(modelDraft);
-      }),
-    },
-    provider: {
-      list: vi.fn<
-        () => readonly {
-          models: ReadonlyMap<string, ModelDraft>;
-          provider: ProviderDraft & { id: string };
-        }[]
-      >(() => []),
-      update: vi.fn<
-        (id: string, update: (draft: ProviderDraft) => void) => void
-      >((_id, update) => {
-        update(providerDraft);
-      }),
-    },
-  };
-  let applyTransform: ((draft: typeof catalog) => void) | undefined;
-  // Mirrors the server: registration stores the callback; reload() replays it.
-  const catalogTransform = vi.fn<
-    (callback: (draft: typeof catalog) => void) => Promise<{
-      dispose: () => void;
-    }>
-  >((callback) => {
-    applyTransform = callback;
-    callback(catalog);
-    return Promise.resolve({ dispose: vi.fn<() => void>() });
-  });
-  const reload = vi.fn<() => Promise<void>>(() => {
-    if (applyTransform) {
-      applyTransform(catalog);
-    }
-    return Promise.resolve();
-  });
-
-  const toolDraft = { add: vi.fn<(tool: RefreshTool) => void>() };
-  // The server applies tool transforms at registration; the mock must too.
-  const toolTransform = vi.fn<
-    (callback: (draft: typeof toolDraft) => void) => Promise<{
-      dispose: () => void;
-    }>
-  >((callback) => {
-    callback(toolDraft);
-    return Promise.resolve({ dispose: vi.fn<() => void>() });
-  });
-
-  return {
-    catalog,
-    ctx: {
-      catalog: {
-        provider: catalog.provider,
-        reload,
-        transform: catalogTransform,
+/** Minimal stand-in for OpenCode's provider editor and the hooks the plugin registers. */
+const fakeContext = (options: Record<string, unknown>, seed: Record_[] = []) => {
+  let transform: ((editor: unknown) => void) | undefined;
+  const hooks: ((event: { model: { providerID: string }; headers: Record<string, string> }) => Promise<void>)[] = [];
+  const reload = vi.fn<() => Promise<void>>(async () => {});
+  const build = () => {
+    const records = new Map(seed.map((record) => [record.provider.id as string, structuredClone(record)]));
+    transform?.({
+      list: () => [...records.values()],
+      get: (id: string) => records.get(id),
+      add: ({ info, models }: { info: Provider.Info; models: readonly Model.Info[] }) => {
+        records.set(info.id, { provider: info, models: new Map(models.map((model) => [model.id as string, model])) });
       },
-      options,
-      tool: { transform: toolTransform },
-    } as never,
-    modelDraft,
-    providerDraft,
-    reload,
-    toolDraft,
+    });
+    return records;
   };
+  const ctx = {
+    options,
+    provider: {
+      transform: async (callback: (editor: unknown) => void) => {
+        transform = callback;
+        return { dispose: async () => {} };
+      },
+      reload,
+    },
+    session: {
+      hook: async (_name: string, callback: (typeof hooks)[number]) => {
+        hooks.push(callback);
+        return { dispose: async () => {} };
+      },
+    },
+  } as unknown as Plugin.Context;
+  return { ctx, build, hooks, reload };
 };
 
-describe("autodiscover plugin (v2)", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
+const json = (status: number, body: unknown) =>
+  new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
-  it("registers providers and models from configured endpoints", async () => {
-    mockFetchModels.mockResolvedValue([
-      createModel("llama3.3:70b"),
-      createModel("qwen2.5:7b"),
-    ]);
-    mockLookupOpenRouterMetadata.mockResolvedValue(null);
-    mockLookupModelsDevMetadata.mockResolvedValue(null);
-
-    const { catalog, ctx, modelDraft, providerDraft, reload } =
-      createMockContext({
-        endpoints: [createEndpoint("ollama", "http://localhost:11434/v1")],
-      });
-
-    await plugin.setup(ctx);
-
-    expect(providerDraft).toMatchObject({
-      package: "@opencode-ai/ai/providers/openai-compatible",
-      settings: { baseURL: "http://localhost:11434/v1" },
-    });
-    expect(
-      catalog.model.update.mock.calls.map(([providerId, modelId]) => [
-        providerId,
-        modelId,
-      ])
-    ).toStrictEqual([
-      ["ollama", "llama3.3:70b"],
-      ["ollama", "qwen2.5:7b"],
-    ]);
-    expect(modelDraft).toMatchObject({ enabled: true, name: "qwen2.5:7b" });
-    expect(mockFetchModels).toHaveBeenCalledWith(
-      "http://localhost:11434/v1",
-      undefined,
-      undefined
-    );
-    expect(reload).not.toHaveBeenCalled();
-  });
-
-  it("passes API key and custom headers to fetchModels and provider settings", async () => {
-    mockFetchModels.mockResolvedValue([createModel("llama3.3:70b")]);
-    mockLookupOpenRouterMetadata.mockResolvedValue(null);
-    mockLookupModelsDevMetadata.mockResolvedValue(null);
-
-    const { ctx, providerDraft } = createMockContext({
-      endpoints: [
-        createEndpoint("lmstudio", "http://localhost:1234/v1", {
-          apiKey: "sk-abc",
-          headers: { "x-custom": "1" },
-        }),
-      ],
-    });
-
-    await plugin.setup(ctx);
-
-    expect(mockFetchModels).toHaveBeenCalledWith(
-      "http://localhost:1234/v1",
-      "sk-abc",
-      { "x-custom": "1" }
-    );
-    expect(providerDraft.headers).toStrictEqual({ "x-custom": "1" });
-    expect(providerDraft.settings).toStrictEqual({
-      apiKey: "sk-abc",
-      baseURL: "http://localhost:1234/v1",
-    });
-  });
-
-  it("falls back to the OPENCODE_LOCAL_<ID>_API_KEY environment variable", async () => {
-    process.env.OPENCODE_LOCAL_LM_STUDIO_API_KEY = "sk-env";
-    try {
-      mockFetchModels.mockResolvedValue([createModel("llama3.3:70b")]);
-      mockLookupOpenRouterMetadata.mockResolvedValue(null);
-      mockLookupModelsDevMetadata.mockResolvedValue(null);
-
-      const { ctx, providerDraft } = createMockContext({
-        endpoints: [createEndpoint("lm-studio", "http://localhost:1234/v1")],
-      });
-
-      await plugin.setup(ctx);
-
-      expect(mockFetchModels).toHaveBeenCalledWith(
-        "http://localhost:1234/v1",
-        "sk-env",
-        undefined
-      );
-      expect(providerDraft.settings).toMatchObject({ apiKey: "sk-env" });
-    } finally {
-      delete process.env.OPENCODE_LOCAL_LM_STUDIO_API_KEY;
+const litellmServer = (validKeys: Set<string>) =>
+  vi.fn<typeof fetch>(async (input, init) => {
+    const url = String(input);
+    const auth = (init?.headers as Record<string, string> | undefined)?.Authorization;
+    if (!auth || !validKeys.has(auth.slice("Bearer ".length))) return json(401, {});
+    if (url.endsWith("/v1/models")) {
+      return json(200, { data: [{ id: "alibaba/qwen3.8-max" }, { id: "local\\qwen3.8-27b" }, { id: "embed-small" }] });
     }
-  });
-
-  it("applies include and exclude patterns before registering models", async () => {
-    mockFetchModels.mockResolvedValue([
-      createModel("llama3.3:70b"),
-      createModel("qwen2.5:7b"),
-      createModel("embedding-model"),
-    ]);
-    mockLookupOpenRouterMetadata.mockResolvedValue(null);
-    mockLookupModelsDevMetadata.mockResolvedValue(null);
-
-    const { catalog, ctx } = createMockContext({
-      endpoints: [
-        createEndpoint("ollama", "http://localhost:11434/v1", {
-          exclude: ["embedding-*"],
-          include: ["*:70b", "qwen2.5:*"],
-        }),
-      ],
-    });
-
-    await plugin.setup(ctx);
-
-    expect(catalog.model.update).toHaveBeenCalledTimes(2);
-    expect(catalog.model.update).toHaveBeenCalledWith(
-      "ollama",
-      "llama3.3:70b",
-      expect.any(Function)
-    );
-    expect(catalog.model.update).toHaveBeenCalledWith(
-      "ollama",
-      "qwen2.5:7b",
-      expect.any(Function)
-    );
-    expect(catalog.model.update).not.toHaveBeenCalledWith(
-      "ollama",
-      "embedding-model",
-      expect.any(Function)
-    );
-  });
-
-  it("does nothing when no endpoints are configured", async () => {
-    const { catalog, ctx, reload, toolDraft } = createMockContext({});
-
-    await plugin.setup(ctx);
-
-    expect(catalog.provider.update).not.toHaveBeenCalled();
-    expect(catalog.model.update).not.toHaveBeenCalled();
-    expect(reload).not.toHaveBeenCalled();
-    expect(toolDraft.add).not.toHaveBeenCalled();
-    expect(mockFetchModels).not.toHaveBeenCalled();
-  });
-
-  it("skips endpoints with invalid id or baseURL", async () => {
-    mockFetchModels.mockResolvedValue([createModel("llama3.3:70b")]);
-    mockLookupOpenRouterMetadata.mockResolvedValue(null);
-    mockLookupModelsDevMetadata.mockResolvedValue(null);
-
-    const { catalog, ctx } = createMockContext({
-      endpoints: [
-        createEndpoint("bad", "not a url"),
-        createEndpoint("", "http://localhost:1/v1"),
-        createEndpoint("ok", "http://localhost:11434/v1"),
-      ],
-    });
-
-    await plugin.setup(ctx);
-
-    expect(catalog.provider.update).toHaveBeenCalledOnce();
-    expect(mockFetchModels).toHaveBeenCalledWith(
-      "http://localhost:11434/v1",
-      undefined,
-      undefined
-    );
-  });
-
-  it("preserves models already defined by the user", async () => {
-    mockFetchModels.mockResolvedValue([
-      createModel("custom-model"),
-      createModel("llama3.3:70b"),
-    ]);
-    mockLookupOpenRouterMetadata.mockResolvedValue(null);
-    mockLookupModelsDevMetadata.mockResolvedValue(null);
-
-    const { catalog, ctx } = createMockContext({
-      endpoints: [createEndpoint("ollama", "http://localhost:11434/v1")],
-    });
-    catalog.model.get.mockImplementation(
-      (_providerId: string, modelId: string) =>
-        modelId === "custom-model" ? { id: "custom-model" } : undefined
-    );
-
-    await plugin.setup(ctx);
-
-    expect(catalog.model.update).toHaveBeenCalledExactlyOnceWith(
-      "ollama",
-      "llama3.3:70b",
-      expect.any(Function)
-    );
-    expect(catalog.model.update).not.toHaveBeenCalledWith(
-      "ollama",
-      "custom-model",
-      expect.any(Function)
-    );
-  });
-
-  it("enriches model limits with OpenRouter metadata and cost with Models.dev", async () => {
-    mockFetchModels.mockResolvedValue([createModel("llama3.3:70b")]);
-    mockLookupOpenRouterMetadata.mockResolvedValue({
-      context_length: 131_072,
-      top_provider: { max_completion_tokens: 8192 },
-    } as OpenRouterModel);
-    mockLookupModelsDevMetadata.mockResolvedValue({
-      cost: { cache_read: 0.25, input: 0.5, output: 1 },
-    } as ModelsDevModel);
-
-    const { ctx, modelDraft } = createMockContext({
-      endpoints: [createEndpoint("ollama", "http://localhost:11434/v1")],
-    });
-
-    await plugin.setup(ctx);
-
-    expect(modelDraft.limit).toStrictEqual({ context: 131_072, output: 8192 });
-    expect(modelDraft.cost).toStrictEqual([
-      { cache: { read: 0.25, write: 0 }, input: 0.5, output: 1 },
-    ]);
-    expect(modelDraft.capabilities.tools).toBeFalsy();
-  });
-
-  it("registers the refresh tool", async () => {
-    mockFetchModels.mockResolvedValue([createModel("llama3.3:70b")]);
-    mockLookupOpenRouterMetadata.mockResolvedValue(null);
-    mockLookupModelsDevMetadata.mockResolvedValue(null);
-
-    const { ctx, toolDraft } = createMockContext({
-      endpoints: [createEndpoint("ollama", "http://localhost:11434/v1")],
-    });
-
-    await plugin.setup(ctx);
-
-    expect(toolDraft.add).toHaveBeenCalledOnce();
-    const [[tool]] = toolDraft.add.mock.calls;
-    expect(tool.name).toBe("refresh-local-models");
-    expect(tool.execute).toBeTypeOf("function");
-  });
-
-  it("refresh tool clears caches, re-discovers, and replays the catalog", async () => {
-    mockFetchModels.mockResolvedValue([createModel("llama3.3:70b")]);
-    mockLookupOpenRouterMetadata.mockResolvedValue(null);
-    mockLookupModelsDevMetadata.mockResolvedValue(null);
-
-    const { ctx, reload, toolDraft } = createMockContext({
-      endpoints: [createEndpoint("ollama", "http://localhost:11434/v1")],
-    });
-
-    await plugin.setup(ctx);
-    const [[tool]] = toolDraft.add.mock.calls;
-
-    const result = await tool.execute({}, {});
-
-    expect(mockClearOpenRouterCache).toHaveBeenCalledOnce();
-    expect(mockClearModelsDevCache).toHaveBeenCalledOnce();
-    expect(mockFetchModels).toHaveBeenCalledTimes(2);
-    expect(reload).toHaveBeenCalledOnce();
-    expect(result.content).toContain("refreshed");
-  });
-
-  it("auto-discovers models for OpenAI-compatible providers in the catalog when options.endpoints is empty", async () => {
-    mockFetchModels.mockResolvedValue([createModel("qwen2.5-coder:32b")]);
-    mockLookupOpenRouterMetadata.mockResolvedValue(null);
-    mockLookupModelsDevMetadata.mockResolvedValue(null);
-
-    const { catalog, ctx, modelDraft, providerDraft, reload } =
-      createMockContext({});
-
-    catalog.provider.list.mockReturnValue([
-      {
-        models: new Map(),
-        provider: {
-          headers: { "sleev-harness": "opencode" },
-          id: "ninerouter",
-          name: "9Router",
-          package: "@opencode-ai/ai/providers/openai-compatible",
-          settings: {
-            apiKey: "sk-test",
-            baseURL: "http://optiplex:17321",
+    if (url.endsWith("/v1/model/info")) {
+      return json(200, {
+        data: [
+          {
+            model_name: "alibaba/qwen3.8-max",
+            litellm_params: { model: "dashscope/qwen3.8-max" },
+            model_info: { mode: "chat", input_cost_per_token: 2e-6, output_cost_per_token: 6e-6, supports_reasoning: true },
           },
-        },
-      },
-    ]);
-
-    await plugin.setup(ctx);
-
-    expect(mockFetchModels).toHaveBeenCalledWith(
-      "http://optiplex:17321",
-      "sk-test",
-      { "sleev-harness": "opencode" }
-    );
-    expect(providerDraft).toMatchObject({
-      headers: { "sleev-harness": "opencode" },
-      name: "9Router",
-      package: "@opencode-ai/ai/providers/openai-compatible",
-      settings: {
-        apiKey: "sk-test",
-        baseURL: "http://optiplex:17321",
-      },
-    });
-    expect(modelDraft).toMatchObject({
-      enabled: true,
-      name: "qwen2.5-coder:32b",
-    });
-    expect(reload).not.toHaveBeenCalled();
+          { model_name: "embed-small", model_info: { mode: "embedding" } },
+        ],
+      });
+    }
+    return json(404, {});
   });
 
-  it("auto-discovers models for providers configured with npm and options fields", async () => {
-    mockFetchModels.mockResolvedValue([createModel("qwen2.5-coder:32b")]);
-    mockLookupOpenRouterMetadata.mockResolvedValue(null);
-    mockLookupModelsDevMetadata.mockResolvedValue(null);
+let cacheDir: string;
+const log = { info: vi.fn<(message: string) => void>(), warn: vi.fn<(message: string) => void>() };
 
-    const { catalog, ctx, modelDraft, providerDraft, reload } =
-      createMockContext({});
+beforeEach(async () => {
+  cacheDir = await mkdtemp(path.join(os.tmpdir(), "autodiscover-plugin-"));
+  log.info.mockClear();
+  log.warn.mockClear();
+});
 
-    catalog.provider.list.mockReturnValue([
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
+});
+
+const options = (provider: Record<string, unknown> = {}) => ({
+  cacheDir,
+  refreshInterval: 0,
+  providers: {
+    litellm: {
+      name: "LiteLLM",
+      baseURL: "http://proxy:4000/v1",
+      apiKey: { env: "TEST_LITELLM_KEY" },
+      metadata: { openrouter: false },
+      ...provider,
+    },
+  },
+});
+
+describe("plugin", () => {
+  it("registers discovered chat models with clean ids, catalog metadata and no key in settings", async () => {
+    vi.stubEnv("TEST_LITELLM_KEY", "sk-good");
+    vi.stubGlobal("fetch", litellmServer(new Set(["sk-good"])));
+    const seed: Record_[] = [
       {
-        models: new Map(),
-        provider: {
-          id: "ninerouter",
-          name: "9Router",
-          npm: "@ai-sdk/openai-compatible",
-          options: {
-            apiKey: "sk-test",
-            baseURL: "http://optiplex:17321",
-            headers: { "sleev-harness": "opencode" },
-          },
-        } as unknown as ProviderDraft & { id: string },
+        provider: { id: "alibaba", name: "Alibaba", activation: "auto", package: "x" } as Provider.Info,
+        models: new Map([["qwen3.8-max", template("alibaba", "qwen3.8-max", { name: "Qwen3.8 Max", family: "qwen" as never })]]),
       },
-    ]);
+    ];
+    const { ctx, build } = fakeContext(options(), seed);
+    await createPlugin({ log }).setup(ctx);
 
-    await plugin.setup(ctx);
+    const litellm = build().get("litellm")!;
+    expect(litellm.provider).toMatchObject({
+      name: "LiteLLM",
+      activation: "enabled",
+      package: "@opencode/ai/providers/openai-compatible",
+      settings: { baseURL: "http://proxy:4000/v1", provider: "litellm" },
+    });
+    expect(JSON.stringify(litellm.provider)).not.toContain("sk-good");
+    expect([...litellm.models.keys()].toSorted()).toEqual(["alibaba/qwen3.8-max", "local/qwen3.8-27b"]);
+    expect(litellm.models.get("local/qwen3.8-27b")?.modelID).toBe("local\\qwen3.8-27b");
+    expect(litellm.models.get("alibaba/qwen3.8-max")).toMatchObject({
+      name: "Qwen3.8 Max (Alibaba)",
+      family: "qwen",
+      cost: [{ input: 2, output: 6 }],
+    });
+  });
 
-    expect(mockFetchModels).toHaveBeenCalledWith(
-      "http://optiplex:17321",
-      "sk-test",
-      { "sleev-harness": "opencode" }
-    );
-    expect(providerDraft).toMatchObject({
-      headers: { "sleev-harness": "opencode" },
-      name: "9Router",
-      package: "@opencode-ai/ai/providers/openai-compatible",
-      settings: {
-        apiKey: "sk-test",
-        baseURL: "http://optiplex:17321",
+  it("adds the key to requests through the model.request hook only", async () => {
+    vi.stubEnv("TEST_LITELLM_KEY", "sk-good");
+    vi.stubGlobal("fetch", litellmServer(new Set(["sk-good"])));
+    const { ctx, hooks } = fakeContext(options());
+    await createPlugin({ log }).setup(ctx);
+
+    const ours = { model: { providerID: "litellm" }, headers: {} as Record<string, string> };
+    const other = { model: { providerID: "openai" }, headers: {} as Record<string, string> };
+    for (const hook of hooks) {
+      await hook(ours);
+      await hook(other);
+    }
+    expect(ours.headers).toEqual({ Authorization: "Bearer sk-good" });
+    expect(other.headers).toEqual({});
+  });
+
+  it("can store the key in provider settings when asked to", async () => {
+    vi.stubEnv("TEST_LITELLM_KEY", "sk-good");
+    vi.stubGlobal("fetch", litellmServer(new Set(["sk-good"])));
+    const { ctx, build, hooks } = fakeContext(options({ keyDelivery: "settings" }));
+    await createPlugin({ log }).setup(ctx);
+    expect(build().get("litellm")?.provider.settings).toMatchObject({ apiKey: "sk-good" });
+    expect(hooks).toHaveLength(0);
+  });
+
+  it("re-reads a rotated key after a 401", async () => {
+    vi.stubEnv("TEST_LITELLM_KEY", "sk-old");
+    const server = litellmServer(new Set(["sk-new"]));
+    vi.stubGlobal("fetch", server);
+    const { ctx, build } = fakeContext(options());
+    const plugin = createPlugin({ log });
+    const pending = plugin.setup(ctx);
+    vi.stubEnv("TEST_LITELLM_KEY", "sk-new");
+    await pending;
+    expect(build().get("litellm")?.models.size).toBe(2);
+  });
+
+  it("serves the disk cache when the endpoint is down, and never caches the key", async () => {
+    vi.stubEnv("TEST_LITELLM_KEY", "sk-good");
+    vi.stubGlobal("fetch", litellmServer(new Set(["sk-good"])));
+    await createPlugin({ log }).setup(fakeContext(options()).ctx);
+
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async () => Promise.reject(new Error("ECONNREFUSED"))));
+    const offline = fakeContext(options());
+    await createPlugin({ log }).setup(offline.ctx);
+    await vi.waitFor(() => expect(log.warn).toHaveBeenCalledWith(expect.stringMatching(/keeping the last known models/u)));
+    expect(offline.build().get("litellm")?.models.size).toBe(2);
+
+    expect(await readFile(path.join(cacheDir, "endpoint-litellm.json"), "utf8")).not.toContain("sk-good");
+  });
+
+  it("keeps config-declared models of the same provider and lets discovery win on id clashes", async () => {
+    vi.stubEnv("TEST_LITELLM_KEY", "sk-good");
+    vi.stubGlobal("fetch", litellmServer(new Set(["sk-good"])));
+    const seed: Record_[] = [
+      {
+        provider: { id: "litellm", name: "cfg", activation: "auto", package: "", headers: { "X-Team": "a" } } as unknown as Provider.Info,
+        models: new Map([
+          ["manual", template("litellm", "manual")],
+          ["local/qwen3.8-27b", template("litellm", "local/qwen3.8-27b", { name: "stale" })],
+        ]),
       },
-    });
-    expect(modelDraft).toMatchObject({
-      enabled: true,
-      name: "qwen2.5-coder:32b",
-    });
-    expect(reload).not.toHaveBeenCalled();
+    ];
+    const { ctx, build } = fakeContext(options(), seed);
+    await createPlugin({ log }).setup(ctx);
+    const record = build().get("litellm")!;
+    expect([...record.models.keys()].toSorted()).toEqual(["alibaba/qwen3.8-max", "local/qwen3.8-27b", "manual"]);
+    expect(record.models.get("local/qwen3.8-27b")?.name).toBe("Qwen3.8 27B (local)");
+    expect(record.provider.headers).toEqual({ "X-Team": "a" });
   });
 });

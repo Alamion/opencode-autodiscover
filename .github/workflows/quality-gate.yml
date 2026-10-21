@@ -5,7 +5,7 @@ on:
 
 jobs:
   gate:
-    name: Lint, test, build, typecheck
+    name: Test and typecheck
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -17,14 +17,8 @@ jobs:
 
       - run: npm ci
 
-      - name: Lint
-        run: npm run check
-
       - name: Test
         run: npm test
-
-      - name: Build
-        run: npm run build
 
       - name: Typecheck
         run: npm run typecheck
